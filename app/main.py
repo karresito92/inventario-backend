@@ -1,36 +1,72 @@
+"""
+Main FastAPI application
+"""
+
 from fastapi import FastAPI
-from app.database.connection import engine, Base
-from app.routers import auth, products, pedidos  
+from fastapi.middleware.cors import CORSMiddleware
 
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI(
-    title="Tienda Backend API",
-    description="Backend para aplicación de inventario y compras",
-    version="1.0.0"
+from app.routers import (
+    users_router,
+    products_router,
+    orders_router,
+    notifications_router
 )
 
+# Initialize FastAPI app
+app = FastAPI(
+    title="Marketplace API",
+    description="API para marketplace completo con usuarios, productos, pedidos y notificaciones",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
-app.include_router(auth.router)
-app.include_router(products.router)
-app.include_router(pedidos.router) 
+# CORS Middleware (para que Flutter pueda conectarse)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción: especificar dominios permitidos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.get("/")
-def read_root():
-    return {"message": "¡Tienda Backend funcionando!", "status": "ready"}
-
+# Health check endpoint
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "message": "API funcionando correctamente"}
+    """Endpoint para verificar que la API está funcionando"""
+    return {
+        "status": "ok",
+        "message": "API is running",
+        "version": "1.0.0"
+    }
 
-@app.get("/test-db")
-def test_database():
-    try:
-        from app.database.connection import SessionLocal
-        from sqlalchemy import text
-        db = SessionLocal()
-        db.execute(text("SELECT 1"))
-        db.close()
-        return {"database": "connected", "status": "ok"}
-    except Exception as e:
-        return {"database": "error", "message": str(e)}
+# Root endpoint
+@app.get("/")
+def root():
+    """Endpoint raíz"""
+    return {
+        "message": "Welcome to Marketplace API",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
+# Include all routers
+app.include_router(users_router, prefix="/api")
+app.include_router(products_router, prefix="/api")
+app.include_router(orders_router, prefix="/api")
+app.include_router(notifications_router, prefix="/api")
+
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    """Se ejecuta al iniciar la aplicación"""
+    print("🚀 Marketplace API starting up...")
+    print("📊 Database: becarios_db")
+    print("🔗 API running on: http://localhost:8001")
+    print("📚 Docs available at: http://localhost:8001/docs")
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Se ejecuta al cerrar la aplicación"""
+    print("👋 Marketplace API shutting down...")

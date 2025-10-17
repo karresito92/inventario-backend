@@ -1,140 +1,173 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+"""
+Products Router - Endpoints for marketplace products
+"""
+
+import uuid
+from typing import List, Optional
+from decimal import Decimal
+
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from typing import List
-from app.database.connection import get_db
-from app.models.product import Product
-from app.models.user import User
-from app.schemas.product import ProductCreate, Product as ProductSchema
-from app.utils.auth import verify_token
+
+from app.dependencies import get_db, get_current_active_user
+from app.schemas.product import (
+    ProductCreate,
+    ProductUpdate,
+    ProductResponse,
+)
+from app.models.product import MarketProduct as Product
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
-def get_current_user(token: str, db: Session):
-    email = verify_token(token)
-    user = db.query(User).filter(User.email == email).first()
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
-        )
-    return user
 
-@router.get("/catalog", response_model=List[ProductSchema])
-def get_catalog(db: Session = Depends(get_db)):
-    products = db.query(Product).filter(
-        Product.vendido == False
-    ).order_by(Product.created_at.desc()).all()
-    return products
-
-@router.post("/publish", response_model=ProductSchema)
-def publish_product(
-    product: ProductCreate, 
-    token: str,
-    db: Session = Depends(get_db)
+@router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
+def create_product(
+    product_data: ProductCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
-    current_user = get_current_user(token, db)
+    """
+    Creates a new product associated with the authenticated user.
+    """
+    if product_data.owner_user_id != current_user.id:
+        raise HTTPException(403, "Cannot create products for other users")
+    
+    if product_data.sku:
+        if db.query(Product).filter(Product.sku == product_data.sku).first():
+            raise HTTPException(400, "Product with this SKU already exists")
     
     db_product = Product(
-        nombre=product.nombre,
-        marca=product.marca,
-        descripcion=product.descripcion,
-        precio=product.precio,
-        estado=product.estado,
-        imagen_url=product.imagen_url,
-        vendido=False,
-        id_usuario=current_user.id_usuario
+        title=product_data.title,
+        description=product_data.description,
+        sku=product_data.sku,
+        owner_user_id=product_data.owner_user_id,
+        kind=product_data.kind if hasattr(product_data, 'kind') else 'physical',
     )
-    
     db.add(db_product)
     db.commit()
     db.refresh(db_product)
-    
     return db_product
 
-@router.get("/my-products", response_model=List[ProductSchema])
-def get_my_products(token: str, db: Session = Depends(get_db)):
-    current_user = get_current_user(token, db)
-    
-    products = db.query(Product).filter(
-        Product.id_usuario == current_user.id_usuario
-    ).order_by(Product.created_at.desc()).all()
-    
-    return products
 
-@router.put("/{product_id}", response_model=ProductSchema)
+@router.get("/{product_id}", response_model=ProductResponse)
+def get_product(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """
+    Returns a product by its ID.
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    
+    # Check permissions (owner or active product)
+    if product.owner_user_id != current_user.id:
+        if not product.is_active:
+            raise HTTPException(403, "Not authorized to view this product")
+    return product
+
+
+@router.put("/{product_id}", response_model=ProductResponse)
 def update_product(
-    product_id: int,
-    product_update: ProductCreate,
-    token: str,
-    db: Session = Depends(get_db)
+    product_id: uuid.UUID,
+    product_data: ProductUpdate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
-    current_user = get_current_user(token, db)
+    """
+    Modifies an existing product.
+    - Only the owner can update it.
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.owner_user_id != current_user.id:
+        raise HTTPException(403, "Not authorized to update this product")
     
-    db_product = db.query(Product).filter(
-        Product.id_producto == product_id
-    ).first()
-    
-    if not db_product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Producto no encontrado"
-        )
-    
-    if db_product.id_usuario != current_user.id_usuario:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permiso para modificar este producto"
-        )
-    
-    if db_product.vendido:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No puedes editar un producto ya vendido"
-        )
-    
-    db_product.nombre = product_update.nombre
-    db_product.marca = product_update.marca
-    db_product.descripcion = product_update.descripcion
-    db_product.precio = product_update.precio
-    db_product.estado = product_update.estado
-    db_product.imagen_url = product_update.imagen_url
-    
+    data = product_data.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        if hasattr(product, k):
+            setattr(product, k, v)
     db.commit()
-    db.refresh(db_product)
-    
-    return db_product
+    db.refresh(product)
+    return product
 
-@router.delete("/{product_id}")
+
+@router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_product(
-    product_id: int,
-    token: str,
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """
+    Permanently deletes a product.
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.owner_user_id != current_user.id:
+        raise HTTPException(403, "Not authorized to delete this product")
+    db.delete(product)
+    db.commit()
+    return
+
+
+@router.get("/me/products", response_model=List[ProductResponse])
+def get_my_products(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000)
+):
+    """
+    Returns all products created by the authenticated user.
+    """
+    return db.query(Product).filter(
+        Product.owner_user_id == current_user.id
+    ).offset(skip).limit(limit).all()
+
+
+@router.get("/", response_model=List[ProductResponse])
+def list_products(
+    search: Optional[str] = Query(None, alias="q"),
+    seller_user_id: Optional[uuid.UUID] = None,
+    skip: int = 0,
+    limit: int = 20,
+    current_user = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    current_user = get_current_user(token, db)
+    """
+    Returns a general list of products with filters.
+    """
+    q = db.query(Product)
     
-    db_product = db.query(Product).filter(
-        Product.id_producto == product_id
-    ).first()
-    
-    if not db_product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Producto no encontrado"
+    if search:
+        like = f"%{search}%"
+        q = q.filter(
+            (Product.title.ilike(like)) |
+            (Product.description.ilike(like))
         )
     
-    if db_product.id_usuario != current_user.id_usuario:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permiso para eliminar este producto"
-        )
+    if seller_user_id:
+        q = q.filter(Product.owner_user_id == seller_user_id)
     
-    if db_product.vendido:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No puedes eliminar un producto ya vendido"
-        )
-    
-    db.delete(db_product)
-    db.commit()
-    
-    return {"message": "Producto eliminado correctamente", "id_producto": product_id}
+    return q.offset(skip).limit(limit).all()
+
+
+@router.get("/public/raw", response_model=List[ProductResponse])
+def get_public_products_raw(
+    db: Session = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000)
+):
+    """
+    Returns publicly visible products (is_active=True).
+    - Does not require authentication.
+    """
+    products = db.query(Product).filter(
+        Product.is_active.is_(True)
+    ).offset(skip).limit(limit).all()
+    return products

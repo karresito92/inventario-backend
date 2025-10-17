@@ -5,7 +5,7 @@ services:
     image: postgres:15
     restart: always
     environment:
-      POSTGRES_DB: inventario
+      POSTGRES_DB: becarios_db
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password123
     ports:
@@ -18,13 +18,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
+  
   web:
     build: .
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:password123@db:5432/inventario
+      - DATABASE_URL=postgresql://postgres:password123@db:5432/becarios_db
       - SECRET_KEY=practica_conjunta
       - ALGORITHM=HS256
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
